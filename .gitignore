@@ -1,0 +1,30 @@
+# Python cache/env
+__pycache__/
+venv/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+
+# Secrets
+.env
+
+# Large downloaded models/data
+pretrained_models/
+
+# Logs
+*.log
+*.log.*
+*.log.*.*
+*.log.*.*.*
+*.log.*.*.*.*
+*.log.*.*.*.*.*
+*.log.*.*.*.*.*.*
+
+src/
+venv/
+instructions.txt
+report.md
+data/
+configs/
