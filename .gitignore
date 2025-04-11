@@ -22,7 +22,7 @@ pretrained_models/
 *.log.*.*.*.*.*
 *.log.*.*.*.*.*.*
 
-src/
+# src/
 venv/
 instructions.txt
 report.md

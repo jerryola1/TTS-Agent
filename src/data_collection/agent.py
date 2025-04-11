@@ -16,6 +16,7 @@ import argparse
 import sys
 import traceback
 from urllib.parse import urlparse
+import re
 
 from data_fetcher import DataFetcher
 from extract_audio import extract_audio_from_videos
@@ -32,6 +33,8 @@ from test_deepfilternet import process_audio_in_chunks as apply_deepfilter_chunk
 from test_loudness_norm import normalize_audio_loudness
 # Import the whisper transcription function
 from test_whisper_transcription import transcribe_audio_files
+# === NEW IMPORT for Step 9.5 ===
+from test_forced_alignment import run_mfa_alignment_on_directory
 
 # Add project root to sys.path to allow imports from other modules
 project_root = Path(__file__).resolve().parent.parent.parent
@@ -308,18 +311,17 @@ class InterviewAgent:
         analysis_results = self._analyze_audio(final_vocals_path)
         self._display_audio_stats(analysis_results)
 
-        # === Step 7: Target Speaker Segment Extraction (New Implementation) ===
+        # === Step 7: Target Speaker Segment Extraction ===
         self.logger.info("Step 7: Extracting speaker segments based on diarization...")
-        diarized_segments_dir = interview_dir / "diarized_segments"
+        diarized_segments_dir = interview_dir / "diarized_segments" # Output dir of segment extraction
         try:
             speaker_segments_data = self._extract_speaker_segments_from_diarization(
                 final_vocals_path, diarization_result, diarized_segments_dir
             )
             if not speaker_segments_data:
-                self.logger.warning(f"No speaker segments extracted for {safe_title}. Skipping.")
-                return # Stop if no segments could be extracted
-            self.logger.info(f"Successfully extracted segments for {len(speaker_segments_data)} speakers.")
-            print(f"Successfully extracted segments for {len(speaker_segments_data)} speakers.")
+                self.logger.warning(f"No speaker segments extracted for {safe_title}. Stopping processing for this source.")
+                return 
+            self.logger.info(f"Successfully extracted segments for {len(speaker_segments_data)} speakers to {diarized_segments_dir}.")
 
         except Exception as e:
             self.logger.error(f"Error during speaker segment extraction for {safe_title}: {e}")
@@ -327,66 +329,122 @@ class InterviewAgent:
             self.logger.warning(f"Skipping source {safe_title} due to segment extraction failure.")
             return
 
-        # === Step 8: Speaker Verification [TO BE REFACTORED] ===
-        self.logger.info("Step 8: Verifying speaker identity... [Refactoring Needed]")
-        # TODO: Refactor _verify_speaker to take speaker_segments_data (dict) as input
-        #       and iterate through speakers/segments, verifying against reference.
-        olamide_dir = interview_dir / "olamide_segments" # Output dir for verified segments
-        olamide_dir.mkdir(parents=True, exist_ok=True)
-        # Assume _verify_speaker saves files to olamide_dir / "verified_segments" and returns a list
-        verified_paths_list = self._verify_speaker(speaker_segments_data, olamide_dir) 
+        # === Step 8: Speaker Verification (Updated) ===
+        self.logger.info("Step 8: Verifying speaker identity with post-filtering...")
+        # Define reference samples dir based on artist name
+        if not self.artist_name:
+             self.logger.error("Artist name not set, cannot perform speaker verification without reference samples path.")
+             return
+        safe_artist_name = self.artist_name.lower().replace(" ", "_")
+        reference_samples_dir = self.base_dir / safe_artist_name / "reference_samples" 
         
-        # Define the directory path where verified files ARE LOCATED for Step 9
-        verified_segments_dir = olamide_dir / "verified_segments" 
-
-        # === Step 9: Transcription (Whisper) ===
-        self.logger.info("Step 9: Transcribing verified segments using Whisper...")
-        # Define output dir for transcripts based on the main interview_dir
-        transcriptions_dir = interview_dir / "transcriptions"
-        
-        # Check if the verified_segments_dir (the DIRECTORY PATH) exists and has content
-        # Use the correct variable 'verified_segments_dir' here
-        if verified_segments_dir and verified_segments_dir.exists() and any(verified_segments_dir.iterdir()):
-            try:
-                # Call the imported transcription function using the DIRECTORY PATH variable
-                transcribe_audio_files(
-                    verified_segments_dir, # USE THIS DIRECTORY PATH
-                    transcriptions_dir,    
-                    model_name="medium"    
-                )
-                self.logger.info(f"Transcription successful. Transcripts saved in: {transcriptions_dir}")
-                print(f"Transcription successful. Transcripts saved in: {transcriptions_dir}")
-            except Exception as e:
-                # Log errors including traceback
-                tb_str = traceback.format_exc()
-                self.logger.error(f"Error during Transcription for {safe_title}: {e}\n{tb_str}")
-                print(f"Error during Transcription for {safe_title}: {e}")
-                self.logger.warning(f"Skipping subsequent steps for {safe_title} due to transcription error.")
-                return # Stop processing if transcription fails
-        elif not verified_segments_dir or not verified_segments_dir.exists():
-             # Use the directory path variable in the log message
-             self.logger.warning(f"Verified segments directory not found ({verified_segments_dir}). Skipping transcription.")
-             return # Cannot proceed without verified segments to transcribe
-        else: # Directory exists but is empty
-             # Use the directory path variable in the log message
-             self.logger.warning(f"No verified segments found in {verified_segments_dir} to transcribe. Stopping processing for this source.")
+        if not reference_samples_dir.is_dir(): # Check if it's a directory
+             self.logger.error(f"Reference samples directory not found or not a directory: {reference_samples_dir}")
+             self.logger.error("Cannot perform speaker verification.")
              return
              
-        # === Step 10: (Old Step 9) Final Segmentation/Chunking [TO BE IMPLEMENTED] ===
+        # Define output directory for the *final* verified segments after filtering
+        final_verified_segments_dir = interview_dir / "verified_segments_final" 
+        verification_results_file = interview_dir / "speaker_verification_details.json" # Detailed results including filtering info
+        
+        try:
+             # Directly call the imported and updated function from test_speaker_verification.py
+             # It now handles model loading, verification, counting, filtering, and copying.
+             final_verified_paths = verify_speaker_segments(
+                 reference_dir=reference_samples_dir,
+                 diarized_segments_dir=diarized_segments_dir, # Input: all diarized segments (from Step 7)
+                 output_dir=final_verified_segments_dir,     # Output: only the final filtered segments
+                 results_output_file=verification_results_file,
+                 threshold=0.8 # Keep using the threshold configured here (or make it a class member)
+                 # Model is loaded internally by the function if not passed
+             )
+             
+             if not final_verified_paths:
+                  self.logger.warning(f"No final segments verified for the target speaker in {safe_title} after post-filtering. Stopping processing.")
+                  return
+             
+             self.logger.info(f"Speaker verification and filtering successful. Found {len(final_verified_paths)} final segments in {final_verified_segments_dir}.")
+             
+        except Exception as e:
+             tb_str = traceback.format_exc()
+             self.logger.error(f"Error during speaker verification step for {safe_title}: {e}\n{tb_str}")
+             self.logger.warning(f"Skipping source {safe_title} due to verification error.")
+             return
+
+        # === Step 9: Transcription (Whisper) ===
+        self.logger.info("Step 9: Transcribing final verified segments using Whisper...")
+        transcriptions_dir = interview_dir / "transcriptions"
+        
+        # Input for transcription is the directory containing the *final* verified segments from Step 8
+        input_for_transcription_dir = final_verified_segments_dir # Use the output dir from Step 8
+
+        if input_for_transcription_dir.exists() and any(input_for_transcription_dir.iterdir()):
+            try:
+                # Call the transcription function without the unsupported 'output_format' argument
+                transcribe_audio_files(
+                    audio_dir=input_for_transcription_dir,
+                    output_dir=transcriptions_dir,
+                    model_name="medium" # Keep other arguments as needed
+                )
+                self.logger.info(f"Transcription successful. Transcripts saved in: {transcriptions_dir}")
+            except Exception as e:
+                # Ensure proper error handling is in place
+                tb_str = traceback.format_exc()
+                self.logger.error(f"Error during Transcription for {safe_title}: {e}\n{tb_str}")
+                self.logger.warning(f"Stopping processing for {safe_title} due to transcription error.")
+                return # Stop processing if transcription fails
+        else:
+             self.logger.warning(f"Final verified segments directory is empty or not found ({input_for_transcription_dir}). Skipping transcription and subsequent steps.")
+             return
+
+        # === Step 9.5: Forced Alignment (MFA) ===
+        self.logger.info("Step 9.5: Performing Forced Alignment using MFA...")
+        input_audio_for_mfa_dir = final_verified_segments_dir # Audio is the final verified segments
+        input_transcripts_for_mfa_dir = transcriptions_dir  # Transcripts are TXT files
+        output_alignment_dir = interview_dir / "mfa_alignments"
+        mfa_temp_dir = interview_dir / "_temp_mfa" 
+
+        try:
+            mfa_success = run_mfa_alignment_on_directory(
+                 input_audio_dir=input_audio_for_mfa_dir,
+                 input_transcript_dir=input_transcripts_for_mfa_dir, # MFA script expects TXT
+                 output_alignment_dir=output_alignment_dir,
+                 mfa_temp_dir=mfa_temp_dir,
+                 num_jobs=4 
+            )
+            if not mfa_success:
+                # ... error handling ...
+                return 
+
+            self.logger.info(f"MFA Forced Alignment successful. Alignments saved in: {output_alignment_dir}")
+
+        except Exception as e:
+             # ... error handling ...
+             return
+             
+        # === Step 10: Final Segmentation/Chunking [TO BE IMPLEMENTED] ===
         self.logger.info("Step 10: Final Segmentation/Chunking... [Not Implemented]")
         # TODO: Implement chunking logic based on transcripts and alignments
         final_chunks = [] # Placeholder
 
-        # === Step 11: (Old Step 10) Audio Normalization & Silence Trim [TO BE IMPLEMENTED] ===
+        # === Step 11: Final Normalization & Silence Trim [TO BE IMPLEMENTED] ===
         self.logger.info("Step 11: Normalization and Trimming... [Not Implemented]")
         # TODO: Implement final normalization/trimming on final_chunks
         normalized_chunks = [] # Placeholder
 
-        # === Step 12 (Old Step 11): Save and organize results ===
-        # Update this step to potentially include transcription info
-        self._save_results(safe_title, verified_paths_list, analysis_results, transcriptions_dir)
+        # === Step 12: Save Results (Summary/Metadata) ===
+        self.logger.info("Step 12: Saving final results summary...")
+        # Pass the list of *final* verified paths AND the directory path to _save_results
+        self._save_results(
+            safe_title, 
+            final_verified_paths, 
+            analysis_results, 
+            transcriptions_dir, 
+            output_alignment_dir,
+            final_verified_segments_dir # <<< PASS the variable here
+        )
 
-        self.logger.info(f"Processing source {safe_title} finished.")
+        self.logger.info(f"--- Processing completed for source: '{source['title']}' ---")
     
     def _extract_audio(self, video_file: Path) -> Optional[Path]:
         """Extract audio from video file."""
@@ -490,45 +548,49 @@ class InterviewAgent:
             print(f"Error during diarization call for {cleaned_audio_path.name}: {e}")
             return None
     
-    def _save_results(self, title: str, verified_segments_list: List[Path], analysis_results: Dict[str, Any], transcriptions_dir: Optional[Path]):
-        """Save processing results and organize segments."""
-        self.logger.info(f"Saving results for {title}")
-        
+    def _save_results(self, title: str, final_verified_paths_list: List[Path], analysis_results: Dict[str, Any], transcriptions_dir: Path, alignment_dir: Path, final_verified_segments_dir: Path):
+        """Save processing results summary (intermediate)."""
+        self.logger.info(f"Saving intermediate results summary for {title}")
+
         try:
-            # Create interview-specific directory
             interview_dir = self.processed_dir / title
-            
-            # Calculate durations from filenames
+            results_file = interview_dir / "processing_summary.json"
+
             segment_durations = []
-            for segment in verified_segments_list:
-                try:
-                    time_range = segment.stem.split('_')[-1]
-                    start_time, end_time = map(float, time_range.split('-'))
-                    duration = end_time - start_time
-                    segment_durations.append(duration)
-                except Exception as e:
-                    self.logger.warning(f"Could not parse duration from filename {segment.name}: {e}")
-                    segment_durations.append(0.0) # Add 0 if parsing fails
-            
-            # Save results metadata
-            results = {
+            for segment_path in final_verified_paths_list: 
+                 try:
+                     # Use the imported 're' module now
+                     time_range_match = re.search(r"_(\d+\.\d+)-(\d+\.\d+)\.wav$", segment_path.name) 
+                     if time_range_match:
+                         start_time = float(time_range_match.group(1))
+                         end_time = float(time_range_match.group(2))
+                         segment_durations.append(end_time - start_time)
+                     else:
+                         # Fallback: Load file if pattern doesn't match (slower)
+                         info = sf.info(str(segment_path))
+                         segment_durations.append(info.duration)
+                 except Exception as e:
+                     self.logger.warning(f"Could not get duration for {segment_path.name}: {e}")
+                     segment_durations.append(0.0)
+
+            summary = {
                 'processed_date': datetime.now().isoformat(),
-                'total_segments': len(verified_segments_list),
-                'segment_durations': segment_durations,
-                'total_duration': sum(segment_durations),
-                'analysis_results': analysis_results
+                'source_title': title,
+                'analysis_results': analysis_results, # Note: relates to pre-diarization audio
+                'final_verified_segments_count': len(final_verified_paths_list),
+                'final_verified_segments_duration': sum(segment_durations),
+                'final_verified_segments_directory': str(final_verified_segments_dir.relative_to(self.base_dir)), # Use correct var name
+                'transcription_directory': str(transcriptions_dir.relative_to(self.base_dir)),
+                'alignment_directory': str(alignment_dir.relative_to(self.base_dir)),
             }
-            
-            results_file = interview_dir / "processing_results.json"
+
             with open(results_file, 'w', encoding='utf-8') as f:
-                json.dump(results, f, indent=2, ensure_ascii=False)
-            
-            self.logger.info(f"Results saved to {results_file}")
-            print(f"Results saved to {results_file}")
-            
+                json.dump(summary, f, indent=2, ensure_ascii=False)
+            self.logger.info(f"Intermediate summary saved to {results_file}")
+
         except Exception as e:
-            self.logger.error(f"Error saving results: {str(e)}")
-            print(f"Error saving results: {str(e)}")
+            self.logger.error(f"Error saving results summary: {e}", exc_info=True)
+            
 
     def _separate_vocals(self, audio_file: Path, output_dir: Path) -> Optional[Path]:
         """Separate vocals from music using Spleeter (Updated)."""
@@ -634,63 +696,6 @@ class InterviewAgent:
             print(f"Error extracting speaker segments: {e}")
             return {} # Return empty dict on error
 
-    def _verify_speaker(self, speaker_segments_data: Dict[str, List[Dict[str, Any]]], output_dir: Path) -> List[Path]:
-        """Verify speaker identity using reference samples."""
-        self.logger.info("Verifying speaker identity...")
-
-        try:
-            # Define paths
-            reference_dir = Path("data/olamide/reference_samples")
-            test_dir = output_dir.parent / "diarized_segments"
-            results_output_file = output_dir / "speaker_verification_results.json"
-
-            # Initialize the speaker recognition model
-            self.logger.info("Loading speaker recognition model...")
-            model = SpeakerRecognition.from_hparams(
-                source="speechbrain/spkrec-ecapa-voxceleb",
-                savedir="pretrained_models/spkrec-ecapa-voxceleb",
-                run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
-            )
-            model.eval()
-            device = next(model.parameters()).device
-            self.logger.info(f"Model loaded onto device: {device}")
-
-            # Call the imported verify_speaker_segments function with the model
-            results = verify_speaker_segments(
-                reference_dir=reference_dir,
-                test_dir=test_dir,
-                output_file=results_output_file,
-                threshold=0.75,
-                model=model  # Pass the model we just loaded
-            )
-
-            # Process results to get verified segments
-            verified_dir = output_dir / "verified_segments"
-            verified_dir.mkdir(exist_ok=True)
-            verified_paths = []
-
-            for segment_filename, result_data in results.items():
-                if result_data['is_same_speaker']:
-                    src_path = test_dir / segment_filename
-                    dst_path = verified_dir / segment_filename
-                    # Ensure source exists before copying
-                    if src_path.exists():
-                        shutil.copy2(src_path, dst_path)
-                        verified_paths.append(dst_path)
-                    else:
-                        self.logger.warning(f"Source segment {src_path} not found during copy.")
-
-            if not verified_paths:
-                self.logger.warning(f"No segments were verified and copied. Check results: {results_output_file}")
-            else:
-                self.logger.info(f"Copied {len(verified_paths)} verified segments to {verified_dir}")
-            
-            return verified_paths
-
-        except Exception as e:
-            self.logger.error(f"Error during speaker verification: {str(e)}", exc_info=True)
-            raise
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process a single interview source")
     parser.add_argument("--artist", required=True, help="Name of the artist")
@@ -705,4 +710,4 @@ if __name__ == "__main__":
     elif args.url is not None:
         agent.process_single_source(source_url=args.url)
     else:
-        print("Please provide either --index or --url") 
+        print("Please provide either a source index or URL") 
