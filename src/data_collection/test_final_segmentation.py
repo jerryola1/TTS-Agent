@@ -4,6 +4,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
+import re # Import re for the expansion logic
 
 import librosa
 import soundfile as sf
@@ -20,6 +21,154 @@ MIN_CHUNK_DURATION_SEC = 2.0
 MAX_CHUNK_DURATION_SEC = 15.0
 MAX_SILENCE_BETWEEN_WORDS_SEC = 0.7 # Max gap within a chunk
 OUTPUT_SAMPLE_RATE = 22050 # Common sample rate for TTS, adjust if needed
+
+# === START: Abbreviation Expansion Dictionary and Function ===
+# Define common English contractions and their expansions
+# This can be expanded significantly
+CONTRACTIONS = {
+    "ain't": "am not", # or "is not", "are not", "has not", "have not"
+    "aren't": "are not",
+    "can't": "cannot",
+    "can't've": "cannot have",
+    "'cause": "because",
+    "could've": "could have",
+    "couldn't": "could not",
+    "couldn't've": "could not have",
+    "didn't": "did not",
+    "doesn't": "does not",
+    "don't": "do not",
+    "hadn't": "had not",
+    "hadn't've": "had not have",
+    "hasn't": "has not",
+    "haven't": "have not",
+    "he'd": "he would", # or he had
+    "he'd've": "he would have",
+    "he'll": "he will",
+    "he'll've": "he will have",
+    "he's": "he is", # or he has
+    "how'd": "how did",
+    "how'd'y": "how do you",
+    "how'll": "how will",
+    "how's": "how is", # or how has, how does
+    "i'd": "i would", # or i had
+    "i'd've": "i would have",
+    "i'll": "i will",
+    "i'll've": "i will have",
+    "i'm": "i am",
+    "i've": "i have",
+    "isn't": "is not",
+    "it'd": "it would", # or it had
+    "it'd've": "it would have",
+    "it'll": "it will",
+    "it'll've": "it will have",
+    "it's": "it is", # or it has
+    "let's": "let us",
+    "ma'am": "madam",
+    "mayn't": "may not",
+    "might've": "might have",
+    "mightn't": "might not",
+    "mightn't've": "might not have",
+    "must've": "must have",
+    "mustn't": "must not",
+    "mustn't've": "must not have",
+    "needn't": "need not",
+    "needn't've": "need not have",
+    "oughtn't": "ought not",
+    "oughtn't've": "ought not have",
+    "shan't": "shall not",
+    "sha'n't": "shall not",
+    "shan't've": "shall not have",
+    "she'd": "she would", # or she had
+    "she'd've": "she would have",
+    "she'll": "she will",
+    "she'll've": "she will have",
+    "she's": "she is", # or she has
+    "should've": "should have",
+    "shouldn't": "should not",
+    "shouldn't've": "should not have",
+    "so've": "so have",
+    "so's": "so is", # or so as
+    "that'd": "that would", # or that had
+    "that'd've": "that would have",
+    "that's": "that is", # or that has
+    "there'd": "there had", # or there would
+    "there'd've": "there would have",
+    "there's": "there is", # or there has
+    "they'd": "they would", # or they had
+    "they'd've": "they would have",
+    "they'll": "they will",
+    "they'll've": "they will have",
+    "they're": "they are",
+    "they've": "they have",
+    "to've": "to have",
+    "wanna": "want to", # Slang expansion
+    "wasn't": "was not",
+    "we'd": "we would", # or we had
+    "we'd've": "we would have",
+    "we'll": "we will",
+    "we'll've": "we will have",
+    "we're": "we are",
+    "we've": "we have",
+    "weren't": "were not",
+    "what'll": "what will",
+    "what'll've": "what will have",
+    "what're": "what are",
+    "what's": "what is", # or what has
+    "what've": "what have",
+    "when's": "when is", # or when has
+    "when've": "when have",
+    "where'd": "where did",
+    "where's": "where is", # or where has
+    "where've": "where have",
+    "who'll": "who will",
+    "who'll've": "who will have",
+    "who's": "who is", # or who has
+    "who've": "who have",
+    "why's": "why is", # or why has
+    "why've": "why have",
+    "will've": "will have",
+    "won't": "will not",
+    "won't've": "will not have",
+    "would've": "would have",
+    "wouldn't": "would not",
+    "wouldn't've": "would not have",
+    "y'all": "you all",
+    "y'all'd": "you all would",
+    "y'all'd've": "you all would have",
+    "y'all're": "you all are",
+    "y'all've": "you all have",
+    "you'd": "you would", # or you had
+    "you'd've": "you would have",
+    "you'll": "you will",
+    "you'll've": "you will have",
+    "you're": "you are",
+    "you've": "you have"
+}
+
+def expand_contractions(text: str, contractions_dict: Dict[str, str]) -> str:
+    """Expands contractions in a given text string."""
+    words = text.split()
+    expanded_words = []
+    for word in words:
+        clean_word = word.lower().strip(".,!?;:'\"") # Basic cleaning
+        if clean_word in contractions_dict:
+            expansion = contractions_dict[clean_word]
+            # Simple capitalization preservation heuristic
+            if word[0].isupper():
+                expansion_parts = expansion.split()
+                # Correctly handle single-word expansions
+                if len(expansion_parts) > 1:
+                    capitalized_expansion = expansion_parts[0].capitalize() + " " + " ".join(expansion_parts[1:])
+                else:
+                    capitalized_expansion = expansion.capitalize()
+                expanded_words.append(capitalized_expansion)
+            else:
+                expanded_words.append(expansion)
+        else:
+            expanded_words.append(word) # Keep original word
+    return " ".join(expanded_words)
+
+# === END: Abbreviation Expansion Dictionary and Function ===
 
 def find_transcript_file(audio_file: Path, transcript_dir: Path) -> Optional[Path]:
     """Find the corresponding transcript file for a given audio file."""
@@ -289,6 +438,14 @@ def create_tts_chunks(
             end_sample = int(end_t * sr)
             chunk_audio = y[start_sample:end_sample]
             chunk_transcript = " ".join(label for _, _, label in words_in_chunk)
+
+            # === START: Apply Contraction Expansion ===
+            normalized_transcript = expand_contractions(chunk_transcript, CONTRACTIONS)
+            if normalized_transcript != chunk_transcript: # Log only if changes were made
+                 logger.debug(f"    Original transcript: {chunk_transcript}")
+                 logger.debug(f"    Normalized transcript: {normalized_transcript}")
+            # === END: Apply Contraction Expansion ===
+
             chunk_wav_filename = f"{base_filename}_tts_{chunk_counter:04d}.wav"
             chunk_txt_filename = f"{base_filename}_tts_{chunk_counter:04d}.txt"
             chunk_wav_path = output_dir / chunk_wav_filename
@@ -296,10 +453,11 @@ def create_tts_chunks(
             try:
                 sf.write(str(chunk_wav_path), chunk_audio, sr)
                 with open(chunk_txt_path, 'w', encoding='utf-8') as f:
-                    f.write(chunk_transcript)
+                    f.write(normalized_transcript)
                 final_chunks_metadata.append({
-                    "audio_filepath": str(chunk_wav_path), 
-                    "text": chunk_transcript, "duration": duration,
+                    "audio_filepath": str(chunk_wav_path),
+                    "text": normalized_transcript,
+                    "duration": duration,
                     "original_audio": str(audio_path), "original_start": start_t, "original_end": end_t,
                 })
                 logger.info(f"Saved chunk {chunk_counter:04d}: {chunk_wav_path.name} ({duration:.2f}s)")
