@@ -35,6 +35,8 @@ from test_loudness_norm import normalize_audio_loudness
 from test_whisper_transcription import transcribe_audio_files
 # === NEW IMPORT for Step 9.5 ===
 from test_forced_alignment import run_mfa_alignment_on_directory
+# === NEW IMPORT for Step 10 ===
+from test_final_segmentation import process_segmentation_for_directory
 
 # Add project root to sys.path to allow imports from other modules
 project_root = Path(__file__).resolve().parent.parent.parent
@@ -69,9 +71,11 @@ class InterviewAgent:
         self.processed_dir = self.artist_dir / "processed"
         self.analysis_dir = self.artist_dir / "analysis"
         self.visualizations_dir = self.artist_dir / "visualizations"
+        # === ADD Directory for Step 10 ===
+        self.tts_chunks_dir = self.artist_dir / "tts_chunks" # Directory to store final TTS chunks across interviews
         
         # Create necessary directories
-        for dir_path in [self.raw_dir, self.processed_dir, self.analysis_dir, self.visualizations_dir]:
+        for dir_path in [self.raw_dir, self.processed_dir, self.analysis_dir, self.visualizations_dir, self.tts_chunks_dir]:
             dir_path.mkdir(parents=True, exist_ok=True)
         
         self.setup_logging()
@@ -422,14 +426,47 @@ class InterviewAgent:
              # ... error handling ...
              return
              
-        # === Step 10: Final Segmentation/Chunking [TO BE IMPLEMENTED] ===
-        self.logger.info("Step 10: Final Segmentation/Chunking... [Not Implemented]")
-        # TODO: Implement chunking logic based on transcripts and alignments
-        final_chunks = [] # Placeholder
+        # === Step 10: Final Segmentation/Chunking using TextGrids ===
+        self.logger.info("Step 10: Creating final TTS chunks based on alignment...")
+        # Define input directories from previous steps
+        input_audio_for_tts_dir = final_verified_segments_dir # Audio segments from Step 8
+        input_textgrid_for_tts_dir = output_alignment_dir     # TextGrids from Step 9.5
+        # Define output directory for this step's results within the interview folder
+        output_tts_chunks_dir = interview_dir / "final_tts_chunks" 
+        output_tts_chunks_dir.mkdir(parents=True, exist_ok=True) # Ensure output dir exists
+
+        if not input_audio_for_tts_dir.exists() or not any(input_audio_for_tts_dir.glob('*.wav')):
+             self.logger.warning(f"Input audio directory for final segmentation is empty or missing: {input_audio_for_tts_dir}. Skipping Step 10.")
+             return
+        if not input_textgrid_for_tts_dir.exists() or not any(input_textgrid_for_tts_dir.glob('*.[Tt]ext[Gg]rid')):
+             self.logger.warning(f"Input TextGrid directory for final segmentation is empty or missing: {input_textgrid_for_tts_dir}. Skipping Step 10.")
+             return
+
+        try:
+             # Call the imported function
+             metadata_path = process_segmentation_for_directory(
+                  input_audio_dir=input_audio_for_tts_dir,
+                  input_textgrid_dir=input_textgrid_for_tts_dir,
+                  output_tts_dir=output_tts_chunks_dir,
+             )
+             
+             if metadata_path:
+                  self.logger.info(f"Final TTS chunk creation successful. Chunks and metadata saved in: {output_tts_chunks_dir}")
+             else:
+                  # The function logs internally if no chunks are created, but we add a warning here too.
+                  self.logger.warning(f"Final TTS chunk creation finished, but no chunks were generated or metadata file wasn't created for {safe_title}.")
+                  # Decide if we should stop processing or continue? For now, let's continue to save results.
+                  # return # Optionally stop here
+
+        except Exception as e:
+             tb_str = traceback.format_exc()
+             self.logger.error(f"Error during Final Segmentation (Step 10) for {safe_title}: {e}\n{tb_str}")
+             self.logger.warning(f"Stopping processing for {safe_title} due to final segmentation error.")
+             return
 
         # === Step 11: Final Normalization & Silence Trim [TO BE IMPLEMENTED] ===
         self.logger.info("Step 11: Normalization and Trimming... [Not Implemented]")
-        # TODO: Implement final normalization/trimming on final_chunks
+        # TODO: Implement final normalization/trimming on final_chunks (output_tts_chunks_dir)
         normalized_chunks = [] # Placeholder
 
         # === Step 12: Save Results (Summary/Metadata) ===
@@ -441,7 +478,8 @@ class InterviewAgent:
             analysis_results, 
             transcriptions_dir, 
             output_alignment_dir,
-            final_verified_segments_dir # <<< PASS the variable here
+            final_verified_segments_dir, # <<< PASS the variable here
+            # TODO: Potentially add output_tts_chunks_dir to the summary?
         )
 
         self.logger.info(f"--- Processing completed for source: '{source['title']}' ---")
