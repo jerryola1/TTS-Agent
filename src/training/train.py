@@ -1,129 +1,207 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-import yaml
+import argparse
+import logging
 import os
 from pathlib import Path
-import librosa
-import numpy as np
-from transformers import Wav2Vec2Model, Wav2Vec2Config
+import torch
+from datetime import datetime
 
-class VoiceDataset(Dataset):
-    def __init__(self, config, split='train'):
-        self.config = config
-        self.split = split
-        self.data_dir = Path(config['data']['processed_data_dir'])
-        self.audio_files = list(self.data_dir.glob('*.wav'))
-        
-    def __len__(self):
-        return len(self.audio_files)
-        
-    def __getitem__(self, idx):
-        audio_path = self.audio_files[idx]
-        audio, sr = librosa.load(audio_path, sr=self.config['model']['sample_rate'])
-        
-        # Ensure audio is within length limits
-        max_length = self.config['model']['sample_rate'] * self.config['model']['max_audio_length']
-        if len(audio) > max_length:
-            audio = audio[:max_length]
-            
-        return torch.FloatTensor(audio)
+# Rich logging
+from rich.logging import RichHandler
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 
-class VoiceCloningModel(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        
-        # Initialize base model
-        self.wav2vec2 = Wav2Vec2Model.from_pretrained(config['model']['base_model'])
-        
-        # Add speaker embedding layer
-        self.speaker_embedding = nn.Embedding(1, 768)  # Single speaker for now
-        
-        # Add projection layers
-        self.projection = nn.Sequential(
-            nn.Linear(768, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256)
-        )
-        
-    def forward(self, x):
-        # Get wav2vec2 features
-        features = self.wav2vec2(x).last_hidden_state
-        
-        # Get speaker embedding
-        speaker_id = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
-        speaker_emb = self.speaker_embedding(speaker_id)
-        
-        # Combine features and speaker embedding
-        combined = features + speaker_emb.unsqueeze(1)
-        
-        # Project to final representation
-        output = self.projection(combined)
-        return output
+# TTS library imports (ensure TTS is installed: pip install TTS)
+try:
+    from TTS.config import BaseAudioConfig, BaseDatasetConfig
+    from TTS.trainer import Trainer, TrainerArgs
+    from TTS.tts.configs.shared_configs import BaseTTSConfig
+    from TTS.tts.configs.xtts_config import XttsConfig
+    from TTS.tts.datasets import BaseDataset
+    from TTS.tts.models.xtts import Xtts
+    from TTS.utils.manage import ModelManager
+except ImportError as e:
+    print(f"Error importing TTS library: {e}")
+    print("Please ensure you have installed it: pip install TTS")
+    exit(1)
 
-def train(config):
-    # Set device
-    device = torch.device(config['hardware']['device'])
-    
-    # Initialize model
-    model = VoiceCloningModel(config).to(device)
-    
-    # Initialize dataset and dataloader
-    train_dataset = VoiceDataset(config, split='train')
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=True,
-        num_workers=config['hardware']['num_workers']
+# --- Rich Logging Setup ---
+console = Console()
+logging.basicConfig(
+    level="INFO",
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(console=console, rich_tracebacks=True, markup=True)]
+)
+logger = logging.getLogger(__name__)
+
+# --- Main Training Function ---
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Fine-tune an XTTS model using Coqui TTS library."
     )
-    
-    # Initialize optimizer
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=config['training']['learning_rate']
+
+    # --- Dataset Arguments ---
+    parser.add_argument(
+        "--dataset_path", type=str, required=True,
+        help="Path to the directory containing the metadata file (e.g., metadata.csv) and audio files.",
     )
-    
-    # Training loop
-    model.train()
-    for epoch in range(config['training']['num_epochs']):
-        total_loss = 0
-        for batch in train_loader:
-            batch = batch.to(device)
-            
-            # Forward pass
-            output = model(batch)
-            
-            # Calculate loss (placeholder for now)
-            loss = torch.mean(output)
-            
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            
-        print(f"Epoch {epoch+1}/{config['training']['num_epochs']}, Loss: {total_loss/len(train_loader)}")
-        
-        # Save checkpoint
-        if (epoch + 1) % config['training']['save_steps'] == 0:
-            checkpoint_path = Path(config['models']['trained']) / f"checkpoint_epoch_{epoch+1}.pt"
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': total_loss/len(train_loader),
-            }, checkpoint_path)
+    parser.add_argument(
+        "--metadata_file", type=str, default="metadata.csv",
+        help="Name of the metadata file within the dataset_path.",
+    )
+
+    # --- Model Arguments ---
+    parser.add_argument(
+        "--model_name", type=str, default="tts_models/multilingual/multi-dataset/xtts_v2",
+        help="Name or path to the pre-trained XTTS model to fine-tune.",
+    )
+    parser.add_argument(
+        "--output_path", type=str, required=True,
+        help="Directory to save checkpoints, logs, and the final model.",
+    )
+
+    # --- Training Arguments ---
+    parser.add_argument(
+        "--epochs", type=int, default=100, help="Number of training epochs."
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=4, help="Training batch size."
+    )
+    parser.add_argument(
+        "--lr", type=float, default=5e-6, help="Initial learning rate."
+    )
+    parser.add_argument(
+        "--grad_accum", type=int, default=4,
+        help="Number of gradient accumulation steps.",
+    )
+    parser.add_argument(
+        "--num_workers", type=int, default=4, help="Number of DataLoader workers."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=54321, help="Random seed for reproducibility."
+    )
+    parser.add_argument(
+        "--save_step", type=int, default=1000, help="Save checkpoint every N steps."
+    )
+    parser.add_argument(
+        "--log_step", type=int, default=100, help="Log training progress every N steps."
+    )
+    parser.add_argument(
+        "--use_gpu", action=argparse.BooleanOptionalAction, default=True, help="Enable/disable GPU usage."
+    )
+
+    args = parser.parse_args()
+
+    # --- Prepare Paths and Directory ---
+    dataset_path = Path(args.dataset_path)
+    metadata_path = dataset_path / args.metadata_file
+    output_path = Path(args.output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"[bold green]Starting XTTS Fine-tuning Process[/bold green]")
+    logger.info(f"Dataset Path: [cyan]{dataset_path}[/cyan]")
+    logger.info(f"Metadata File: [cyan]{metadata_path}[/cyan]")
+    logger.info(f"Output Path: [cyan]{output_path}[/cyan]")
+    logger.info(f"Pre-trained Model: [cyan]{args.model_name}[/cyan]")
+
+    if not metadata_path.exists():
+        logger.error(f"Metadata file not found: {metadata_path}")
+        return
+
+    # --- Configuration Setup ---
+    logger.info("Setting up configurations...")
+
+    # Audio config (usually okay to keep defaults from the model)
+    audio_config = BaseAudioConfig(
+        sample_rate=24000, # XTTS default, do not change unless your data is different and you know why
+        # Other params usually loaded from model checkpoint
+    )
+
+    # Dataset config
+    # Using LJSpeech format (wav_path|transcript) as created by prepare_tts_data.py
+    dataset_config = BaseDatasetConfig(
+        formatter="ljspeech", meta_file_train=args.metadata_file, path=str(dataset_path)
+    )
+
+    # Model config (Load from pre-trained)
+    # We need ModelManager to download/find the model first
+    manager = ModelManager()
+    model_path, config_path, _ = manager.download_model(args.model_name)
+
+    if config_path is None or not Path(config_path).exists():
+         logger.error(f"Could not find config file for model {args.model_name}. Check the model name.")
+         # Attempt to load default if path is missing - might fail
+         config = XttsConfig()
+         # Manually set sample rate as BaseTTSConfig might not have it directly
+         config.audio = audio_config
+         logger.warning("Could not load model config, using default XttsConfig.")
+    else:
+        config = XttsConfig()
+        config.load_json(config_path)
+        config.audio = audio_config # Ensure audio config is updated
+
+    # Set fine-tuning specific parameters
+    config.batch_size = args.batch_size
+    config.eval_batch_size = max(1, args.batch_size // 2) # Usually smaller for eval
+    config.num_loader_workers = args.num_workers
+    config.num_eval_loader_workers = args.num_workers
+    config.output_path = str(output_path)
+    config.epochs = args.epochs
+    config.save_step = args.save_step
+    config.log_step = args.log_step
+    config.save_checkpoints = True
+    config.save_all_best = True # Save best model based on eval loss
+    config.print_step = 50 # How often to print step progress
+    config.plot_step = 100 # How often to plot attention/specs
+    config.seed = args.seed
+    config.gradient_accumulation_steps = args.grad_accum
+
+    # Set learning rate and optimizer details (can be tuned)
+    config.optimizer = "AdamW"
+    config.optimizer_params = {"betas": [0.9, 0.999], "eps": 1e-8, "weight_decay": 1e-4}
+    config.lr = args.lr
+    # Scheduler options can be added here if needed
+
+    # --- Initialize Model ---
+    logger.info("Initializing XTTS model...")
+    model = Xtts.init_from_config(config)
+
+    # Load pre-trained weights
+    if model_path is None or not Path(model_path).exists():
+         logger.error(f"Could not find model checkpoint file for {args.model_name}. Check the model name or path.")
+         logger.warning("Proceeding with randomly initialized weights - this is NOT fine-tuning!")
+    else:
+        logger.info(f"Loading weights from: [cyan]{model_path}[/cyan]")
+        model.load_checkpoint(config, checkpoint_path=model_path, eval=False, strict=False) # Use strict=False for potential mismatches
+
+    # --- Initialize Trainer ---
+    logger.info("Initializing Trainer...")
+    trainer_args = TrainerArgs(
+         restore_path=None, # Set to a checkpoint path to resume training
+         # skip_train_epoch=False # Set to True if resuming and wanting to skip current epoch
+         # --- Other TrainerArgs can be set here if needed ---
+    )
+
+    # Progress bar setup for Trainer
+    # Not directly customizing Trainer's internal bar here, but Rich logger will capture its output
+    trainer = Trainer(
+        trainer_args,
+        config,
+        output_path=str(output_path),
+        model=model,
+        train_samples=None, # Trainer will use the dataset config
+        eval_samples=None,  # No eval split defined in this basic setup
+    )
+
+    # --- Start Training ---
+    logger.info(f"[bold green]Starting Training...[/bold green]")
+    try:
+        trainer.fit()
+        logger.info(f"[bold green]Training Finished Successfully![/bold green]")
+    except Exception as e:
+        logger.exception(f"[bold red]An error occurred during training:[/bold red] {e}")
+
 
 if __name__ == "__main__":
-    # Load config
-    with open("configs/config.yaml", 'r') as f:
-        config = yaml.safe_load(f)
-        
-    # Create output directory
-    os.makedirs(config['models']['trained'], exist_ok=True)
-    
-    # Start training
-    train(config) 
+    main() 
