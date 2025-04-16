@@ -223,41 +223,41 @@ class InterviewAgent:
             return 
         
         # === Step 4: Apply Noise Reduction === COMMENTED OUT ===
-        # self.logger.info("Step 4: Applying noise reduction to vocals...")
-        # # Define output path using the stem of the vocals file
-        # cleaned_vocals_path = interview_dir / f"{vocals_file.stem}_cleaned.wav"
-        # try:
-        #     # Call the imported, tested chunked deepfilter function directly
-        #     apply_deepfilter_chunked(
-        #         str(vocals_file),
-        #         str(cleaned_vocals_path)
-        #         # Default chunk/overlap settings from test_deepfilternet will be used
-        #     )
-        #     # Check if the output file was actually created
-        #     if not cleaned_vocals_path.exists():
-        #         # If the function didn't raise an error but file is missing, log and stop
-        #         self.logger.error(f"DeepFilterNet processing seemed to finish but output file is missing: {cleaned_vocals_path}")
-        #         self.logger.warning(f"Skipping source {safe_title} due to noise reduction failure.")
-        #         return # Stop processing
-        #
-        #     self.logger.info(f"Noise reduction successful. Cleaned vocals: {cleaned_vocals_path}")
-        #     print(f"Noise reduction successful. Cleaned vocals: {cleaned_vocals_path}")
-        #
-        # except Exception as e:
-        #     # Log errors including traceback
-        #     tb_str = traceback.format_exc()
-        #     self.logger.error(f"Error during DeepFilterNet noise reduction for {vocals_file.name}: {e}\n{tb_str}")
-        #     print(f"Error applying noise reduction to {vocals_file.name}: {e}")
-        #     self.logger.warning(f"Skipping source {safe_title} due to noise reduction failure.")
-        #     return # Stop processing if noise reduction fails
+        self.logger.info("Step 4: Applying noise reduction to vocals...")
+        # Define output path using the stem of the vocals file
+        cleaned_vocals_path = interview_dir / f"{vocals_file.stem}_cleaned.wav"
+        try:
+            # Call the imported, tested chunked deepfilter function directly
+            apply_deepfilter_chunked(
+                str(vocals_file),
+                str(cleaned_vocals_path)
+                # Default chunk/overlap settings from test_deepfilternet will be used
+            )
+            # Check if the output file was actually created
+            if not cleaned_vocals_path.exists():
+                # If the function didn't raise an error but file is missing, log and stop
+                self.logger.error(f"DeepFilterNet processing seemed to finish but output file is missing: {cleaned_vocals_path}")
+                self.logger.warning(f"Skipping source {safe_title} due to noise reduction failure.")
+                return # Stop processing
+
+            self.logger.info(f"Noise reduction successful. Cleaned vocals: {cleaned_vocals_path}")
+            print(f"Noise reduction successful. Cleaned vocals: {cleaned_vocals_path}")
+
+        except Exception as e:
+            # Log errors including traceback
+            tb_str = traceback.format_exc()
+            self.logger.error(f"Error during DeepFilterNet noise reduction for {vocals_file.name}: {e}\n{tb_str}")
+            print(f"Error applying noise reduction to {vocals_file.name}: {e}")
+            self.logger.warning(f"Skipping source {safe_title} due to noise reduction failure.")
+            return # Stop processing if noise reduction fails
         # === END OF COMMENTED OUT Step 4 ===
 
         # Set the input for the next step (Normalization) to be the Spleeter output
-        input_for_norm_path = vocals_file
+        input_for_norm_path = cleaned_vocals_path
 
         # === Step 4.5: Loudness Normalization ===
         # (This step now processes the direct output from Spleeter)
-        self.logger.info("Step 4.5: Normalizing loudness of Spleeter vocals...")
+        self.logger.info("Step 4.5: Normalizing loudness of cleaned vocals...")
         # Adjust output filename to reflect input is direct from Spleeter
         normalized_vocals_path = interview_dir / f"{input_for_norm_path.stem}_normalized.wav"
         try:

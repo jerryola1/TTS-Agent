@@ -17,9 +17,9 @@ def process_audio_in_chunks(input_path, output_path, chunk_duration_s=60, overla
     
     # Check CUDA status
     cuda_available = torch.cuda.is_available()
-    device = "cuda" if cuda_available else "cpu"
+    device = "cpu" # Force CPU usage
     print(f"CUDA available: {cuda_available}")
-    print(f"Using device: {device}")
+    print(f"Using device: {device} (Forced CPU for compatibility)")
     
     # Load the audio file
     print(f"\nLoading audio file: {input_path}")

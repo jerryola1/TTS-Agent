@@ -28,3 +28,9 @@ instructions.txt
 report.md
 data/
 configs/
+
+TTS/
+alltalk_tts/
+DeepFilterNet/
+runs/
+speechbrain/
